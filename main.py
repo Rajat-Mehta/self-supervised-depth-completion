@@ -14,6 +14,11 @@ import criteria
 import helper
 from inverse_warp import Intrinsics, homography_from
 import os, ssl
+import cv2
+import numpy as np
+import matplotlib.pyplot as plt
+cmap = plt.cm.jet
+TEST_PRED_PATH = '/raid/rajat/datasets/kitti/data_depth/depth_selection/test_depth_completion_anonymous/prediction_results/'
 
 if (not os.environ.get('PYTHONHTTPSVERIFY', '') and getattr(ssl, '_create_unverified_context', None)):
     ssl._create_default_https_context = ssl._create_unverified_context
@@ -112,6 +117,7 @@ parser.add_argument(
     choices=["dense", "sparse", "photo", "sparse+photo", "dense+photo"],
     help='dense | sparse | photo | sparse+photo | dense+photo')
 parser.add_argument('-e', '--evaluate', default='', type=str, metavar='PATH')
+parser.add_argument('-tc', '--test_completion', default='', type=str, metavar='PATH')
 parser.add_argument('--cpu', action="store_true", help='run on cpu')
 
 args = parser.parse_args()
@@ -256,10 +262,30 @@ def iterate(mode, args, loader, model, optimizer, logger, epoch):
     return avg, is_best
 
 
+def predict(mode, args, loader, model, optimizer, logger, epoch):
+    model.eval()
+
+    for i, batch_data in enumerate(loader):
+        batch_data = {
+            key: val.to(device)
+            for key, val in batch_data.items() if val is not None
+        }
+        pred = model(batch_data)
+        depth = np.squeeze(pred.data.cpu().numpy())
+        depth = (depth - np.min(depth)) / (np.max(depth) - np.min(depth))
+        depth = 255 * cmap(depth)[:, :, :3]  # H, W, C
+        depth = depth.astype('uint8')
+        depth = cv2.cvtColor(depth, cv2.COLOR_RGB2BGR)
+        cv2.imwrite(TEST_PRED_PATH + str(i).zfill(10)+'.png', depth)
+    
+    print("Test data prediction finished")
+
+
 def main():
     global args
     checkpoint = None
     is_eval = False
+    is_predict =False
     if args.evaluate:
         args_new = args
         if os.path.isfile(args.evaluate):
@@ -273,6 +299,20 @@ def main():
             print("Completed.")
         else:
             print("No model found at '{}'".format(args.evaluate))
+            return
+    elif args.test_completion:
+        args_new = args
+        if os.path.isfile(args.test_completion):
+            print("=> loading checkpoint '{}' ... ".format(args.test_completion),
+                  end='')
+            checkpoint = torch.load(args.test_completion, map_location=device)
+            args = checkpoint['args']
+            #args.data_folder = args_new.data_folder
+            #args.val = args_new.val
+            is_predict = True
+            print("Completed.")
+        else:
+            print("No model found at '{}'".format(args.test_completion))
             return
     elif args.resume:  # optionally resume from a checkpoint
         args_new = args
@@ -307,7 +347,7 @@ def main():
 
     # Data loading code
     print("=> creating data loaders ... ")
-    if not is_eval:
+    if not is_eval or not is_predict:
         train_dataset = KittiDepth('train', args)
         train_loader = torch.utils.data.DataLoader(train_dataset,
                                                    batch_size=args.batch_size,
@@ -325,6 +365,15 @@ def main():
         pin_memory=True)  # set batch size to be 1 for validation
     print("\t==> val_loader size:{}".format(len(val_loader)))
 
+    tc_dataset = KittiDepth('test_completion', args)
+    tc_loader = torch.utils.data.DataLoader(
+        tc_dataset,
+        batch_size=1,
+        shuffle=False,
+        num_workers=2,
+        pin_memory=True)  # set batch size to be 1 for validation
+    print("\t==> test_completion_loader size:{}".format(len(tc_loader)))
+
     # create backups and results folder
     logger = helper.logger(args)
     if checkpoint is not None:
@@ -334,6 +383,11 @@ def main():
     if is_eval:
         print("=> starting model evaluation ...")
         result, is_best = iterate("val", args, val_loader, model, None, logger,
+                                  checkpoint['epoch'])
+        return
+    if is_predict:
+        print("=> starting prediction on test set ...")
+        result, is_best = predict("test_completion", args, tc_loader, model, None, logger,
                                   checkpoint['epoch'])
         return
 
